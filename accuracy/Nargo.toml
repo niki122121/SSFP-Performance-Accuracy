@@ -1,0 +1,7 @@
+[package]
+name = "accuracy"
+type = "bin"
+authors = [""]
+
+[dependencies]
+ssfp = {path = "../../Noir-SSFP"}

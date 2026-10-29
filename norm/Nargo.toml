@@ -1,0 +1,7 @@
+[package]
+name = "norm"
+type = "bin"
+authors = [""]
+
+[dependencies]
+ssfp = {path = "../../Noir-SSFP"}

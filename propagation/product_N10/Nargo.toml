@@ -1,0 +1,7 @@
+[package]
+name = "ssfp_product_n10"
+type = "bin"
+authors = []
+
+[dependencies]
+ssfp = { path = "../../../Noir-SSFP" }
