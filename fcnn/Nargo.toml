@@ -1,0 +1,6 @@
+[package]
+name = "fcnn"
+type = "bin"
+authors = [""]
+
+[dependencies]
