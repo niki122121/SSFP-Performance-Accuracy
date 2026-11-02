@@ -2,17 +2,23 @@
 """Drive successive SSFP/Noir SGD steps through Prover.toml.
 
 Requirements: Python >=3.11, numpy, nargo in PATH, MNIST IDX .gz files.
-The Noir debugging circuit must return a *flat* [Field; TOTAL_PARAMETERS+1]:
-W1, W2, W3, b1, b2, b3 in column-major order, then loss at level 1.
-See fcnn_debug_output_patch.md for the required Noir-side changes.
+By default the Noir circuit can keep returning its original three Fields.
+The Python harness instead reads the eight consecutive runtime prints:
+loss, probabilities, W1, b1, W2, b2, W3, b3.
+The prints are emitted by ssfp_context::append_ctx_println and the default
+loss level is 2 (original SSFP loss). Optionally, --output-source return
+supports a debug circuit returning flattened updated weights and loss.
 
 This is an execution/training harness, not a proof verifier. It executes the
 same Noir program for each batch, without generating cryptographic proofs.
+Classification metrics use NumPy inference on Noir-updated fixed-point weights;
+they are not direct measurements of Noir inference accuracy.
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
 import csv
 import gzip
 import hashlib
@@ -36,7 +42,7 @@ INPUT_SIZE = 784
 HIDDEN_SIZE_1 = 64
 HIDDEN_SIZE_2 = 32
 OUTPUT_SIZE = 10
-BATCH_SIZE = 4
+BATCH_SIZE = 16
 MAX_TRAINING_BATCHES = 9380  # Matches the current Noir configuration.
 
 PARAMETERS = (
@@ -49,11 +55,13 @@ PARAMETERS = (
 )
 TOTAL_PARAMETERS = sum(math.prod(shape) for _, _, shape, _ in PARAMETERS)
 EXPECTED_OUTPUT_COUNT = TOTAL_PARAMETERS + 1
+DEFAULT_PRINT_LOSS_LEVEL = 2  # Verified from the original Noir runtime print.
 METRIC_COLUMNS = (
     "step", "epoch", "batch", "elapsed_s", "noir_loss_pre", "numpy_loss_pre",
     "numpy_loss_post", "train_accuracy", "train_precision_macro",
     "train_recall_macro", "train_f1_macro", "test_accuracy",
     "test_precision_macro", "test_recall_macro", "test_f1_macro",
+    "validation_loss",
 )
 
 
@@ -82,6 +90,8 @@ def load_idx_labels(path: Path) -> np.ndarray:
         raw = np.frombuffer(handle.read(), dtype=np.uint8)
     if raw.size != count:
         raise ValueError(f"Label payload length mismatch: {path}")
+    if np.any(raw >= OUTPUT_SIZE):
+        raise ValueError(f"Invalid MNIST class label in {path}")
     return raw.copy()
 
 
@@ -123,7 +133,9 @@ def field_int(value: object) -> int:
 
 
 def field_to_signed(value: object, modulus: int) -> int:
-    n = field_int(value) % modulus
+    n = field_int(value)
+    if not (0 <= n < modulus):
+        raise ValueError(f"Noncanonical returned Field value: {n}")
     return n - modulus if n > modulus // 2 else n
 
 
@@ -209,7 +221,60 @@ def read_updated_parameters(path: Path, modulus: int) -> tuple[dict[str, np.ndar
         result[name] = raw.reshape(shape, order="F")
         at += count
     loss_raw = field_to_signed(flat[-1], modulus)
+    if loss_raw < 0:
+        raise ValueError(f"Noir returned a negative cross-entropy loss: {loss_raw}")
     return result, loss_raw
+
+
+
+def read_printed_parameters(path: Path, modulus: int) -> tuple[dict[str, np.ndarray], int]:
+    """Parse the eight original ssfp_context::append_ctx_println outputs.
+
+    Expected order: loss, probabilities[BATCH_SIZE][OUTPUT_SIZE], W1, b1,
+    W2, b2, W3, b3. Matrices are printed in their natural 2-D row-major
+    shape, unlike the optional flattened return values (column-major).
+    Compiler warnings and the three-element circuit return are ignored.
+    """
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    names = ("probabilities", "W1", "b1", "W2", "b2", "W3", "b3")
+    expected = {"probabilities": (BATCH_SIZE, OUTPUT_SIZE)}
+    expected.update({name: shape for name, _, shape, _ in PARAMETERS})
+    for i in range(len(lines) - 7):
+        if not lines[i].strip().startswith("0x"):
+            continue
+        if not all(lines[i + j].lstrip().startswith("[[") for j in range(1, 8)):
+            continue
+        try:
+            loss_raw = field_to_signed(int(lines[i].strip(), 16), modulus)
+            if loss_raw < 0:
+                raise ValueError("Negative cross-entropy loss")
+            tensors = {}
+            for offset, name in enumerate(names, 1):
+                value = ast.literal_eval(lines[i + offset].strip())
+                rows, cols = expected[name]
+                if not isinstance(value, list) or len(value) != rows:
+                    raise ValueError(f"{name} expected {rows} rows, got {len(value) if isinstance(value, list) else type(value).__name__}")
+                if any(not isinstance(row, list) or len(row) != cols for row in value):
+                    raise ValueError(f"{name} expected {cols} columns per row")
+                tensors[name] = value
+            result = {}
+            for name, _, shape, _ in PARAMETERS:
+                # Here the logs preserve rows and columns directly: no order='F'.
+                result[name] = np.fromiter(
+                    (field_to_signed(v, modulus) for row in tensors[name] for v in row),
+                    dtype=object, count=math.prod(shape)).reshape(shape)
+            # Check all prints were decoded; this catches noncanonical Fields.
+            for row in tensors["probabilities"]:
+                for v in row:
+                    field_to_signed(v, modulus)
+            return result, loss_raw
+        except (ValueError, TypeError, SyntaxError, MemoryError) as exc:
+            raise RuntimeError(f"Malformed SSFP runtime prints near line {i + 1} of {path}: {exc}") from exc
+    raise RuntimeError(
+        f"Could not find eight consecutive SSFP prints in {path}. "
+        "Keep append_ctx_println(loss.v), probabilities.mat, W1, b1, W2, b2, W3, b3 "
+        "in that exact order and ensure nargo execute prints runtime values."
+    )
 
 
 def validate_level_bounds(parameters: dict[str, np.ndarray], w: int, d: int) -> None:
@@ -285,6 +350,19 @@ def read_checkpoint(path: Path, config: dict, subset_digest: str) -> tuple[dict[
     return params, int(payload["next_step"])
 
 
+def noir_source_fingerprint(project: Path) -> str:
+    """Detect changes to the local Noir program across resume operations.
+
+    External git/path dependency versions are not included; pin those separately.
+    """
+    source_files = [project / "Nargo.toml", *sorted((project / "src").rglob("*.nr"))]
+    digest = hashlib.sha256()
+    for path in source_files:
+        digest.update(str(path.relative_to(project)).encode("utf-8"))
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
 def run_nargo(project: Path, nargo: str, log_path: Path, action: str) -> float:
     if action == "compile":
         command = [nargo, "compile"]
@@ -311,57 +389,110 @@ def append_metrics(path: Path, row: dict[str, object]) -> None:
         writer.writerow(row)
 
 
-def save_plots(metrics_path: Path, workdir: Path) -> None:
-    """Plot per-step loss and accuracy if matplotlib is installed."""
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except ImportError:
-        print("matplotlib not installed; metrics.csv still contains the full history")
-        return
-    with metrics_path.open("r", newline="", encoding="utf-8") as handle:
-        rows = list(csv.DictReader(handle))
-    if not rows:
-        return
-    step = np.array([int(r["step"]) for r in rows])
-    noir_loss = np.array([float(r["noir_loss_pre"]) for r in rows])
-    np_pre = np.array([float(r["numpy_loss_pre"]) for r in rows])
-    np_post = np.array([float(r["numpy_loss_post"]) for r in rows])
-    fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.plot(step, noir_loss, label="SSFP loss (pre-update)", alpha=0.7)
-    ax.plot(step, np_pre, label="NumPy loss (pre-update)", alpha=0.6)
-    ax.plot(step, np_post, label="NumPy loss (post-update)", alpha=0.6)
-    if len(step) >= 5:
-        window = min(10, len(step))
-        running = np.convolve(noir_loss, np.ones(window) / window, mode="valid")
-        ax.plot(step[window - 1:], running, label=f"SSFP rolling mean ({window})", linewidth=2)
-    ax.set(xlabel="Training step", ylabel="Cross-entropy loss", title="SSFP FCNN training loss")
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(workdir / "loss_curve.png", dpi=150)
-    plt.close(fig)
+def reconcile_metrics(path: Path, completed_steps: int) -> None:
+    """Rollback metrics rows that were written before an interrupted checkpoint.
 
-    fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.plot(step, [float(r["train_accuracy"]) for r in rows], label="Train accuracy")
-    ax.plot(step, [float(r["test_accuracy"]) for r in rows], label="Test accuracy")
-    ax.set(xlabel="Training step", ylabel="Accuracy", title="SSFP FCNN classification accuracy", ylim=(0, 1))
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(workdir / "accuracy_curve.png", dpi=150)
-    plt.close(fig)
+    The checkpoint is committed after the corresponding CSV row. If a process
+    dies between these writes, the uncheckpointed step will be replayed on resume.
+    """
+    if not path.exists():
+        if completed_steps:
+            raise RuntimeError("Checkpoint exists but metrics.csv is missing; cannot resume cleanly")
+        return
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        rows = list(reader)
+        old_columns = reader.fieldnames
+    steps = [int(r["step"]) for r in rows]
+    if steps != list(range(1, len(steps) + 1)):
+        raise RuntimeError("metrics.csv has missing, duplicate, or out-of-order steps")
+    if len(rows) < completed_steps:
+        raise RuntimeError("Checkpoint is ahead of metrics.csv; cannot resume cleanly")
+    if len(rows) > completed_steps or old_columns == list(METRIC_COLUMNS[:-1]):
+        tmp = path.with_name(path.name + ".tmp")
+        with tmp.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=METRIC_COLUMNS)
+            writer.writeheader()
+            writer.writerows(rows[:completed_steps])
+        os.replace(tmp, path)
+        if len(rows) > completed_steps:
+            print(f"Discarded {len(rows)-completed_steps} uncheckpointed metric row(s) before resume")
+
+
+def self_test() -> None:
+    """Exercise serialization, field signs, column-major order, and recovery."""
+    import tempfile
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        mod = BN254_MODULUS
+        params = initial_parameters(42, 16)
+        params["W1"][0, 0], params["W1"][1, 0], params["W1"][0, 1] = 11, -12, 13
+        params["b3"][0, 0], params["b3"][0, 1] = -5, 7
+        prover = root / "Prover.toml"
+        write_prover(prover, np.zeros((BATCH_SIZE, INPUT_SIZE), dtype=np.uint8),
+                     np.arange(BATCH_SIZE, dtype=np.uint8), params, mod)
+        with prover.open("rb") as handle:
+            doc = tomllib.load(handle)
+        assert doc["W1_raw"][0][0] == str(11)
+        assert doc["W1_raw"][1][0] == str(mod - 12)
+        assert doc["b3_raw"][0] == str(mod - 5)
+        assert len(doc["data_train"]) == BATCH_SIZE
+        flat = []
+        for name, _, _, _ in PARAMETERS:
+            flat.extend(encode_field(int(v), mod) for v in params[name].flatten(order="F"))
+        flat.append(encode_field(123456, mod))
+        with prover.open("a", encoding="utf-8") as handle:
+            handle.write("return = [" + ", ".join(flat) + "]\n")
+        decoded, loss = read_updated_parameters(prover, mod)
+        assert loss == 123456
+        for name, _, _, _ in PARAMETERS:
+            assert np.array_equal(decoded[name], params[name]), name
+        # Simulate actual Noir-style runtime prints, including unrelated warnings.
+        print_path = root / "nargo_execute.log"
+        with print_path.open("w", encoding="utf-8") as handle:
+            handle.write("warning: Return variable contains a constant value\n")
+            handle.write("0x24d72ca10\n")
+            handle.write(str([[0] * OUTPUT_SIZE for _ in range(BATCH_SIZE)]) + "\n")
+            for name in ("W1", "b1", "W2", "b2", "W3", "b3"):
+                tensor = [[int(v) % mod for v in row] for row in params[name].tolist()]
+                handle.write(str(tensor) + "\n")
+            handle.write("Prover.toml return = [0,0,0]\n")
+        printed, printed_loss = read_printed_parameters(print_path, mod)
+        assert printed_loss == int("24d72ca10", 16)
+        for name, _, _, _ in PARAMETERS:
+            assert np.array_equal(printed[name], params[name]), name
+        with patch("builtins.print"):
+            metrics = root / "metrics.csv"
+            for step in (1, 2):
+                append_metrics(metrics, {"step": step})
+            reconcile_metrics(metrics, 1)
+        with metrics.open(newline="", encoding="utf-8") as handle:
+            assert [int(r["step"]) for r in csv.DictReader(handle)] == [1]
+        assert abs(cross_entropy(probabilities(params, np.zeros((BATCH_SIZE, INPUT_SIZE), dtype=np.uint8), 16),
+                                 np.zeros(BATCH_SIZE, dtype=np.uint8)) - 2.302585093) < 0.1
+    print("Self-test passed: TOML, negative Fields, both print and return decoding, metrics recovery, NumPy evaluation")
+
+
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--project", type=Path, required=True, help="Path to the Noir project (Nargo.toml)")
-    ap.add_argument("--mnist-dir", type=Path, required=True, help="Path to the 4 MNIST .gz files")
-    ap.add_argument("--train-samples", type=int, default=40, help="Multiple of 4 (default: 40)")
-    ap.add_argument("--test-samples", type=int, default=500)
+    ap.add_argument("--project", type=Path, help="Path to the Noir project (Nargo.toml)")
+    ap.add_argument("--mnist-dir", type=Path, help="Path to the 4 MNIST .gz files")
+    ap.add_argument("--train-samples", type=int, default=1600, help="Positive multiple of BATCH_SIZE (default: 1600)")
+    ap.add_argument("--test-samples", type=int, default=2000, help="Positive multiple of BATCH_SIZE (default: 2000)")
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--w", type=int, default=32)
     ap.add_argument("--d", type=int, default=16)
     ap.add_argument("--field-modulus", type=int, default=BN254_MODULUS)
+    ap.add_argument("--output-source", choices=("prints", "return"), default="prints",
+                    help="Read updated weights from eight runtime prints (default) or flattened circuit return")
+    ap.add_argument("--loss-level", type=int, default=None,
+                    help="SSFP level of the printed/returned loss (default: 2 for prints, 1 for return)")
+    ap.add_argument("--max-steps", type=int, default=None, help="Run at most this many NEW batches; useful for one-batch smoke tests")
+    ap.add_argument("--skip-compile", action="store_true", help="Skip explicit nargo compile (execute still checks the circuit)")
+    ap.add_argument("--self-test", action="store_true", help="Test the Python harness without MNIST or Nargo")
     ap.add_argument("--model-seed", type=int, default=42)
     ap.add_argument("--shuffle-seed", type=int, default=42)
     ap.add_argument("--subset-seed", type=int, default=42)
@@ -370,6 +501,17 @@ def main() -> None:
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--dry-run", action="store_true", help="Only write one Prover.toml, without invoking nargo")
     args = ap.parse_args()
+    if args.self_test:
+        self_test()
+        return
+    if args.project is None or args.mnist_dir is None:
+        ap.error("--project and --mnist-dir are required unless using --self-test")
+    if args.loss_level is None:
+        args.loss_level = DEFAULT_PRINT_LOSS_LEVEL if args.output_source == "prints" else 1
+    if args.loss_level < 1:
+        ap.error("--loss-level must be >= 1")
+    if args.max_steps is not None and args.max_steps < 1:
+        ap.error("--max-steps must be positive")
 
     project = args.project.expanduser().resolve()
     mnist_dir = args.mnist_dir.expanduser().resolve()
@@ -377,25 +519,32 @@ def main() -> None:
     workdir.mkdir(parents=True, exist_ok=True)
     if not (project / "Nargo.toml").exists():
         ap.error(f"No Nargo.toml in {project}")
-    if args.train_samples % BATCH_SIZE != 0 or args.train_samples <= 0:
-        ap.error("--train-samples must be a positive multiple of BATCH_SIZE=4")
-    if args.epochs < 1 or args.d < 1 or args.w < 1 or args.test_samples < 1:
-        ap.error("Invalid epoch, precision or test subset size")
+    if args.train_samples <= 0 or args.train_samples % BATCH_SIZE != 0:
+        ap.error(f"--train-samples must be a positive multiple of BATCH_SIZE={BATCH_SIZE}")
+    if args.test_samples <= 0 or args.test_samples % BATCH_SIZE != 0:
+        ap.error(f"--test-samples must be a positive multiple of BATCH_SIZE={BATCH_SIZE}")
+    if args.epochs < 1 or args.d < 1 or args.w < 1:
+        ap.error("Invalid epoch or precision")
     if args.field_modulus <= 2 ** (args.w + 2 * args.d + 2):
         ap.error("Field modulus is too small for chosen fixed-point configuration")
 
     x_train_all, y_train_all, x_test_all, y_test_all = load_mnist(mnist_dir)
     train_indices = balanced_subset_indices(y_train_all, args.train_samples, args.subset_seed)
     test_indices = balanced_subset_indices(y_test_all, args.test_samples, args.subset_seed + 1)
-    subset_digest = hashlib.sha256(train_indices.tobytes() + test_indices.tobytes()).hexdigest()
     x_train, y_train = x_train_all[train_indices], y_train_all[train_indices]
     x_test, y_test = x_test_all[test_indices], y_test_all[test_indices]
+    digest = hashlib.sha256()
+    for a in (train_indices, test_indices, x_train, y_train, x_test, y_test):
+        digest.update(a.tobytes())
+    subset_digest = digest.hexdigest()
 
     # Do not include epoch count here, to support extending training after a resume.
     config = {"w": args.w, "d": args.d, "field_modulus": str(args.field_modulus),
               "train_samples": args.train_samples, "test_samples": args.test_samples,
               "model_seed": args.model_seed, "subset_seed": args.subset_seed,
               "shuffle_seed": args.shuffle_seed, "batch_size": BATCH_SIZE,
+              "loss_level": args.loss_level, "output_source": args.output_source,
+              "noir_source_sha256": noir_source_fingerprint(project),
               "network": [INPUT_SIZE, HIDDEN_SIZE_1, HIDDEN_SIZE_2, OUTPUT_SIZE]}
     checkpoint_path = workdir / "checkpoint.json.gz"
     metrics_path = workdir / "metrics.csv"
@@ -408,6 +557,8 @@ def main() -> None:
             ap.error(f"Checkpoint already exists at {checkpoint_path}. Use --resume or change --workdir")
         parameters, next_step = initial_parameters(args.model_seed, args.d), 0
     validate_level_bounds(parameters, args.w, args.d)
+    if args.resume:
+        reconcile_metrics(metrics_path, next_step)
     steps_per_epoch = args.train_samples // BATCH_SIZE
     total_steps = steps_per_epoch * args.epochs
     if total_steps > MAX_TRAINING_BATCHES:
@@ -422,11 +573,13 @@ def main() -> None:
     print(f"MNIST: train={len(x_train)}, test={len(x_test)}; "
           f"steps per epoch={steps_per_epoch}; total steps={total_steps}")
     print(f"Fixed-point: W={args.w}, D={args.d}, W1 level=2, others level=1")
-    if not args.dry_run:
+    print(f"Updated weights: {args.output_source}; Noir loss level: {args.loss_level}")
+    if not args.dry_run and not args.skip_compile:
         compile_s = run_nargo(project, args.nargo, workdir / "compile.log", "compile")
         print(f"Compilation completed in {compile_s:.2f}s", flush=True)
 
-    for step in range(next_step, total_steps):
+    end_step = min(total_steps, next_step + args.max_steps) if args.max_steps is not None else total_steps
+    for step in range(next_step, end_step):
         epoch, batch_index = divmod(step, steps_per_epoch)
         # Independent epoch-specific, deterministic permutations; resume-safe.
         order = np.random.default_rng(args.shuffle_seed + epoch).permutation(args.train_samples)
@@ -441,33 +594,41 @@ def main() -> None:
         pre_prob = probabilities(parameters, batch_pixels, args.d)
         pre_loss = cross_entropy(pre_prob, batch_labels)
         elapsed = run_nargo(project, args.nargo, workdir / "last_execute.log", "execute")
-        updated, loss_raw = read_updated_parameters(prover_path, args.field_modulus)
+        if args.output_source == "prints":
+            updated, loss_raw = read_printed_parameters(workdir / "last_execute.log", args.field_modulus)
+        else:
+            updated, loss_raw = read_updated_parameters(prover_path, args.field_modulus)
         validate_level_bounds(updated, args.w, args.d)
-        noir_loss = loss_raw / float(1 << args.d)  # Debug circuit resets loss to level 1.
+        noir_loss = loss_raw / float(1 << (args.d * args.loss_level))
+        if not np.isfinite(noir_loss) or (pre_loss > 0.05 and not 0.1 <= noir_loss / pre_loss <= 10.0):
+            raise ValueError(f"Noir loss {noir_loss:.8g} differs by over 10x from NumPy {pre_loss:.8g}; "
+                             "check --loss-level, decoded output order, and circuit arithmetic")
         post_loss = cross_entropy(probabilities(updated, batch_pixels, args.d), batch_labels)
         parameters = updated
 
-        # Save raw integer parameter state before recording metrics.
-        write_checkpoint(checkpoint_path, parameters, step + 1, config, subset_digest)
         train_scores = classification_metrics(probabilities(parameters, x_train, args.d), y_train)
-        test_scores = classification_metrics(probabilities(parameters, x_test, args.d), y_test)
+        test_prob = probabilities(parameters, x_test, args.d)
+        test_scores = classification_metrics(test_prob, y_test)
+        validation_loss = cross_entropy(test_prob, y_test)
         row = {"step": step + 1, "epoch": epoch + 1, "batch": batch_index + 1,
                "elapsed_s": round(elapsed, 3), "noir_loss_pre": round(noir_loss, 7),
                "numpy_loss_pre": round(pre_loss, 7), "numpy_loss_post": round(post_loss, 7),
+               "validation_loss": round(validation_loss, 7),
                **{f"train_{k}": round(v, 6) for k, v in train_scores.items()},
                **{f"test_{k}": round(v, 6) for k, v in test_scores.items()}}
         append_metrics(metrics_path, row)
+        # Commit checkpoint last: if interrupted, an uncheckpointed row is rolled back on resume.
+        write_checkpoint(checkpoint_path, parameters, step + 1, config, subset_digest)
         print(f"epoch {epoch + 1}/{args.epochs} batch {batch_index + 1}/{steps_per_epoch} "
               f"| Noir loss(pre) {noir_loss:.5f} | NumPy loss {pre_loss:.5f}->{post_loss:.5f} "
-              f"| train acc {train_scores['accuracy']:.1%} | test acc {test_scores['accuracy']:.1%} "
+              f"| val loss {validation_loss:.5f} "
+              f"| NumPy-eval train acc {train_scores['accuracy']:.1%} | test acc {test_scores['accuracy']:.1%} "
               f"| {elapsed:.2f}s", flush=True)
         if batch_index == steps_per_epoch - 1:
-            save_plots(metrics_path, workdir)
             print(f"  epoch {epoch + 1}: test macro precision={test_scores['precision_macro']:.3f}, "
                   f"recall={test_scores['recall_macro']:.3f}, F1={test_scores['f1_macro']:.3f}", flush=True)
 
-    save_plots(metrics_path, workdir)
-    print(f"Completed {total_steps} steps. Metrics: {metrics_path}; checkpoint: {checkpoint_path}; plots: {workdir}")
+    print(f"Completed {end_step} of {total_steps} planned steps. Metrics: {metrics_path}; checkpoint: {checkpoint_path}; plots: {workdir}")
 
 
 if __name__ == "__main__":

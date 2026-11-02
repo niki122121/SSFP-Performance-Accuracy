@@ -4,3 +4,5 @@ type = "bin"
 authors = [""]
 
 [dependencies]
+ssfp = {path = "../../Noir-SSFP"}
+poseidon = { tag = "v0.3.0", git = "https://github.com/noir-lang/poseidon" }
