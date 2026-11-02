@@ -4,7 +4,7 @@ use ssfp::{SSFP_CTX_INIT, SSFP_CTX_SOLVE, SSFP_PUSH_OUTPUT};
 use ssfp::ssfp_context;
 use std::{meta::ctstring::AsCtString, static_assert};
 
-comptime global TEST_MODE: bool = true; //no hashing for faster testing
+comptime global TEST_MODE: bool = false; //no hashing for faster testing
 comptime global TEST_PRINT_ALL: bool = true; //when testing we can print weights, biases, loss... (this dumps a lot of text)
 
 comptime global INPUT_SIZE: u32 = 784;
@@ -12,7 +12,7 @@ comptime global HIDDEN_SIZE_1: u32 = 64;
 comptime global HIDDEN_SIZE_2: u32 = 32;
 comptime global OUTPUT_SIZE: u32 = 10;
 comptime global OUTPUT_SIZE_BITS: u32 = 4;
-comptime global BATCH_SIZE: u32 = 16;
+comptime global BATCH_SIZE: u32 = 4;
 comptime global DZ1_BITS: u128 = 26;
 comptime global MAX_TRAINING_BATCHES: u32 = 9380;
 
