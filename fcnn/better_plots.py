@@ -61,15 +61,15 @@ def main():
     fig.savefig(output1, dpi=200)
     plt.close(fig)
 
-    # Graph 2: post-update NumPy training-batch loss vs post-update validation loss.
+    # Graph 2: post-update NumPy training-batch loss vs post-update test loss.
     fig, ax = plt.subplots(figsize=(6.5, 6.5), layout="constrained")
     ax.set_box_aspect(1)
-    ax.plot(steps, numpy_post, label="NumPy train batch (post-update)", linewidth=1.3)
-    ax.plot(steps, val_loss, label="NumPy validation (post-update)", linewidth=1.3)
-    ax.set(title="NumPy training vs validation loss", xlabel="Training step", ylabel="Cross-entropy loss")
+    ax.plot(steps, numpy_post, label="Train loss (post-update)", linewidth=1.3)
+    ax.plot(steps, val_loss, label="Test loss (post-update)", linewidth=1.3)
+    ax.set(title="NumPy training vs test loss", xlabel="Training step", ylabel="Cross-entropy loss")
     ax.grid(alpha=0.25)
     ax.legend(fontsize=9)
-    output2 = METRICS_DIR / "train_vs_validation_loss.png"
+    output2 = METRICS_DIR / "train_vs_test_loss.png"
     fig.savefig(output2, dpi=200)
     plt.close(fig)
 
