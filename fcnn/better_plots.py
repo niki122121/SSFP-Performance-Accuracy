@@ -33,7 +33,6 @@ def main():
     train_acc = np.array([float(row["train_accuracy"]) for row in rows])
     test_acc = np.array([float(row["test_accuracy"]) for row in rows])
 
-    # Graph 1: pre-update training losses.
     fig, ax = plt.subplots(figsize=(10, 4.5))
     marker_stride = max(1, len(steps) // 24)
     ax.plot(
@@ -61,9 +60,7 @@ def main():
     fig.savefig(output1, dpi=200)
     plt.close(fig)
 
-    # Graph 2: post-update NumPy training-batch loss vs post-update test loss.
-    fig, ax = plt.subplots(figsize=(6.5, 6.5), layout="constrained")
-    ax.set_box_aspect(1)
+    fig, ax = plt.subplots(figsize=(10, 6), layout="constrained")
     ax.plot(steps, numpy_post, label="Train loss (post-update)", linewidth=1.3)
     ax.plot(steps, val_loss, label="Test loss (post-update)", linewidth=1.3)
     ax.set(title="NumPy training vs test loss", xlabel="Training step", ylabel="Cross-entropy loss")
@@ -73,9 +70,7 @@ def main():
     fig.savefig(output2, dpi=200)
     plt.close(fig)
 
-    # Graph 3: original accuracy graph (8 x 4.5 inches, blue/orange colors).
-    fig, ax = plt.subplots(figsize=(6.5, 6.5), layout="constrained")
-    ax.set_box_aspect(1)
+    fig, ax = plt.subplots(figsize=(10, 6), layout="constrained")
     ax.plot(steps, train_acc, label="Train accuracy", color="tab:blue")
     ax.plot(steps, test_acc, label="Test accuracy", color="tab:orange")
     ax.set(xlabel="Training step", ylabel="Accuracy",
