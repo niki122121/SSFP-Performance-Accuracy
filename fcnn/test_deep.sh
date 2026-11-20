@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-NAME="nn_ssfp"
+NAME="fcnn"
 SCHEME="ultra_honk"
 
 timereal() {

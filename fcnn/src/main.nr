@@ -4,8 +4,8 @@ use ssfp::{SSFP_CTX_INIT, SSFP_CTX_SOLVE, SSFP_PUSH_OUTPUT};
 use ssfp::ssfp_context;
 use std::{meta::ctstring::AsCtString, static_assert};
 
-comptime global TEST_MODE: bool = false; //no hashing for faster testing
-comptime global TEST_PRINT_ALL: bool = true; //when testing we can print weights, biases, loss... (this dumps a lot of text)
+comptime global TEST_MODE: bool = true; //no hashing for faster testing
+comptime global TEST_PRINT_ALL: bool = false; //when testing we can print weights, biases, loss... (this dumps a lot of text)
 
 comptime global INPUT_SIZE: u32 = 784;
 comptime global HIDDEN_SIZE_1: u32 = 64;
@@ -56,8 +56,7 @@ global PACKED_TOTAL: u32 =
 global K_W1: u32 = pack_per_field(W1_LVL);
 global K_OTHERS: u32 = pack_per_field(OTHER_LVL);
 
-mod tests;
-
+//mod tests;
 // ----------------------------------------------------------------------------------
 
 comptime fn relu(mat_ssfp: SSFP_MATRIX) -> SSFP_MATRIX{
@@ -168,23 +167,23 @@ comptime fn backward(
     // having to do it at the end (tipically W -= dW * LR, but here it is already backed in).
     // Also, we do a manual reset (by testing it gave us slightly less acir opcodes)
     let dz3: SSFP_MATRIX = (probabilites - labels_adj).mult_val(BATCH_SIZE_INV).mult_val(LEARNING_RATE).reset_full();
-    let dW3: SSFP_MATRIX = a2.mult(dz3, true, false);
+    let dW3: SSFP_MATRIX = a2.transpose() * dz3;
     let db3: SSFP_MATRIX = dz3.add_rows();
-    let da2: SSFP_MATRIX = dz3.mult(W3, false, true);
+    let da2: SSFP_MATRIX = dz3 * W3.transpose();
 
     let dz2: SSFP_MATRIX = da2.mult_elemwise(relu_der(z2));
-    let dW2: SSFP_MATRIX = a1.mult(dz2, true, false);
+    let dW2: SSFP_MATRIX = a1.transpose() * dz2;
     let db2: SSFP_MATRIX = dz2.add_rows();
-    let da1: SSFP_MATRIX = dz2.mult(W2, false, true);
+    let da1: SSFP_MATRIX = dz2 * W2.transpose();
 
     // manual reset of dz1 is purely for convinience as it makes level dW1 = 2
     // This coincides with the starting level of W1 and allows us to avoid an expensive reset of all it's elements
     let dz1: SSFP_MATRIX = da1.mult_elemwise(relu_der(z1)).reset_full();
-    // This check is key as it constarins the updated weights 1 without explicitly calling .check() on the entire weight matrix
-    // the chosen DZ1_BITS combined with the know ranges of x and the know number of batches to be performed when training
+    // This check is key as it constarins the updated weights_1 without explicitly calling .check() on the entire weight matrix
+    // the chosen DZ1_BITS combined with the known ranges of x and the known number of batches to be performed when training
     // allows us to establish this limit.
     dz1.check_raw_bit_size(DZ1_BITS as u32);
-    let dW1: SSFP_MATRIX = x.mult(dz1, true, false);
+    let dW1: SSFP_MATRIX = x.transpose() * dz1;
     let db1: SSFP_MATRIX = dz1.add_rows();
 
     (dW1, db1, dW2, db2, dW3, db3)

@@ -4,7 +4,7 @@ use ssfp::{SSFP_METADATA, SSFP};
 use ssfp::SSFP_MATRIX;
 use ssfp::Array_of_SSFP;
 
-global N: u32 = 10000;
+global N: u32 = 100;
 
 fn main(data: [Field; N]) -> pub [Field; N] {
     //min_max(data)
