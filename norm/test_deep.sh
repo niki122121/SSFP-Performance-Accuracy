@@ -21,9 +21,7 @@ nargo info --silence-warnings
 echo ""
 
 echo "BARRETENBERG GATES:________________________________________"
-timereal bb gates \
-  -s "$SCHEME" \
-  -b "target/${NAME}.json"
+bb gates -s "$SCHEME" -b "target/${NAME}.json"
 echo ""
 
 echo "EXECUTE (no compilation):___________________________________"

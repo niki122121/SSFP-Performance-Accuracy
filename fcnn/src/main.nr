@@ -12,7 +12,7 @@ comptime global HIDDEN_SIZE_1: u32 = 64;
 comptime global HIDDEN_SIZE_2: u32 = 32;
 comptime global OUTPUT_SIZE: u32 = 10;
 comptime global OUTPUT_SIZE_BITS: u32 = 4;
-comptime global BATCH_SIZE: u32 = 4;
+comptime global BATCH_SIZE: u32 = 8;
 comptime global DZ1_BITS: u128 = 26;
 comptime global MAX_TRAINING_BATCHES: u32 = 9380;
 

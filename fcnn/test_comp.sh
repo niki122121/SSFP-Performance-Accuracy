@@ -15,7 +15,5 @@ timereal nargo compile --silence-warnings --force > /dev/null
 echo ""
 
 echo "BARRETENBERG GATES:________________________________________"
-timereal bb gates \
-  -s "$SCHEME" \
-  -b "target/${NAME}.json"
+bb gates -s "$SCHEME" -b "target/${NAME}.json"
 echo ""
