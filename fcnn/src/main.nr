@@ -2,17 +2,15 @@ use ssfp::{SSFP, SSFP_METADATA, SSFP_MATRIX};
 use ssfp::{WHOLE_BITS, DECIMAL_BITS, INV_PRECISION_LVL, lvl_bits};
 use ssfp::{SSFP_CTX_INIT, SSFP_CTX_SOLVE, SSFP_PUSH_OUTPUT};
 use ssfp::ssfp_context;
-use std::{meta::ctstring::AsCtString, static_assert};
+use std::{static_assert};
 
-comptime global TEST_MODE: bool = true; //no hashing for faster testing
-comptime global TEST_PRINT_ALL: bool = false; //when testing we can print weights, biases, loss... (this dumps a lot of text)
 
 comptime global INPUT_SIZE: u32 = 784;
 comptime global HIDDEN_SIZE_1: u32 = 64;
 comptime global HIDDEN_SIZE_2: u32 = 32;
 comptime global OUTPUT_SIZE: u32 = 10;
 comptime global OUTPUT_SIZE_BITS: u32 = 4;
-comptime global BATCH_SIZE: u32 = 8;
+comptime global BATCH_SIZE: u32 = 4;
 comptime global DZ1_BITS: u128 = 26;
 comptime global MAX_TRAINING_BATCHES: u32 = 9380;
 
@@ -27,34 +25,6 @@ comptime mut global BATCH_SIZE_INV: SSFP = SSFP::default();
 comptime global SSFP_MD_DEFAULT: SSFP_METADATA = SSFP_METADATA::default();
 comptime global SSFP_MD_NEG: SSFP_METADATA = SSFP_METADATA{sgnKnown: true, sgnPos: false};
 comptime global SSFP_MD_UNKNOWN: SSFP_METADATA = SSFP_METADATA{sgnKnown: false, sgnPos: true};
-
-global TOTAL_LENG: u32 = INPUT_SIZE * HIDDEN_SIZE_1 + 
-HIDDEN_SIZE_1 * HIDDEN_SIZE_2 + HIDDEN_SIZE_2 * OUTPUT_SIZE + 
-HIDDEN_SIZE_1 + HIDDEN_SIZE_2 + OUTPUT_SIZE;
-
-comptime fn pack_per_field(lvl: u32) -> u32 {
-    let BITS: u32 = lvl_bits(lvl);
-    let DIGIT_BITS: u32 = BITS + 1;
-    let FIELD_BITS: u32 = (std::field::modulus_num_bits() as u32) - 1;
-    static_assert(DIGIT_BITS <= FIELD_BITS, "SSFP value is too wide for packing");
-    FIELD_BITS / DIGIT_BITS
-}
-comptime fn packed_len(M: u32, N: u32, lvl: u32) -> u32 {
-    let K: u32 = pack_per_field(lvl);
-    (M * N + K - 1) / K
-}
-global W1_LVL: u32 = 2;
-global OTHER_LVL: u32 = 1;
-global PACKED_TOTAL: u32 =
-    packed_len(INPUT_SIZE, HIDDEN_SIZE_1, W1_LVL) +
-    packed_len(HIDDEN_SIZE_1, HIDDEN_SIZE_2, OTHER_LVL) +
-    packed_len(HIDDEN_SIZE_2, OUTPUT_SIZE, OTHER_LVL) +
-    packed_len(1, HIDDEN_SIZE_1, OTHER_LVL) +
-    packed_len(1, HIDDEN_SIZE_2, OTHER_LVL) +
-    packed_len(1, OUTPUT_SIZE, OTHER_LVL);
-
-global K_W1: u32 = pack_per_field(W1_LVL);
-global K_OTHERS: u32 = pack_per_field(OTHER_LVL);
 
 //mod tests;
 // ----------------------------------------------------------------------------------
@@ -270,17 +240,25 @@ comptime fn validate_and_adjust_labels<let N_SAMPLES: u32>(labels_train_ctstr: C
     SSFP_MATRIX::new(N_SAMPLES, OUTPUT_SIZE, 0, SSFP_MD_DEFAULT, l_adj_ctstr_var)
 }
 
-
+// input weights and biases, outputs loss, updated weights and updated biases
 pub fn train_batch(
     data_train: [[Field; INPUT_SIZE]; BATCH_SIZE],
     labels_train: [Field; BATCH_SIZE],
     W1_raw: [[Field; HIDDEN_SIZE_1]; INPUT_SIZE],
     W2_raw: [[Field; HIDDEN_SIZE_2]; HIDDEN_SIZE_1],
     W3_raw: [[Field; OUTPUT_SIZE]; HIDDEN_SIZE_2],
-    b1_raw: [Field; HIDDEN_SIZE_1],
-    b2_raw: [Field; HIDDEN_SIZE_2],
-    b3_raw: [Field; OUTPUT_SIZE]
-) -> [Field; 3]{
+    b1_raw: [[Field; HIDDEN_SIZE_1]; 1],
+    b2_raw: [[Field; HIDDEN_SIZE_2]; 1],
+    b3_raw: [[Field; OUTPUT_SIZE]; 1]
+) -> (
+    Field, 
+    [[Field; HIDDEN_SIZE_1]; INPUT_SIZE],
+    [[Field; HIDDEN_SIZE_2]; HIDDEN_SIZE_1],
+    [[Field; OUTPUT_SIZE]; HIDDEN_SIZE_2],
+    [[Field; HIDDEN_SIZE_1]; 1],
+    [[Field; HIDDEN_SIZE_2]; 1],
+    [[Field; OUTPUT_SIZE]; 1]
+){
     let res = comptime{
         static_assert(
             (BATCH_SIZE as u128) * (MAX_TRAINING_BATCHES as u128)* (1u128 << DZ1_BITS)
@@ -301,10 +279,9 @@ pub fn train_batch(
         let W2: SSFP_MATRIX = SSFP_MATRIX::init(HIDDEN_SIZE_1, HIDDEN_SIZE_2, 1, SSFP_MD_DEFAULT, "W2_raw");
         let W3: SSFP_MATRIX = SSFP_MATRIX::init(HIDDEN_SIZE_2, OUTPUT_SIZE, 1, SSFP_MD_DEFAULT, "W3_raw");
 
-        let b1: SSFP_MATRIX = SSFP_MATRIX::new_from_arr(1, HIDDEN_SIZE_1, 1, SSFP_MD_UNKNOWN, "b1_raw");
-        let b2: SSFP_MATRIX = SSFP_MATRIX::new_from_arr(1, HIDDEN_SIZE_2, 1, SSFP_MD_UNKNOWN, "b2_raw");
-        let b3: SSFP_MATRIX = SSFP_MATRIX::new_from_arr(1, OUTPUT_SIZE, 1, SSFP_MD_UNKNOWN, "b3_raw");
-
+        let b1: SSFP_MATRIX = SSFP_MATRIX::init(1, HIDDEN_SIZE_1, 1, SSFP_MD_UNKNOWN, "b1_raw");
+        let b2: SSFP_MATRIX = SSFP_MATRIX::init(1, HIDDEN_SIZE_2, 1, SSFP_MD_UNKNOWN, "b2_raw");
+        let b3: SSFP_MATRIX = SSFP_MATRIX::init(1, OUTPUT_SIZE, 1, SSFP_MD_UNKNOWN, "b3_raw");
 
         
         let x_train_raw: SSFP_MATRIX = SSFP_MATRIX::init_from_ints(BATCH_SIZE, INPUT_SIZE, SSFP_MD_DEFAULT, "data_train");
@@ -342,31 +319,37 @@ pub fn train_batch(
 
 
         SSFP_PUSH_OUTPUT(loss);
-        if TEST_MODE{
-            // no need for hashing in test mode
-            SSFP_PUSH_OUTPUT("0".as_ctstring());
-            SSFP_PUSH_OUTPUT("0".as_ctstring());
-            if TEST_PRINT_ALL{
-                // we can see more params and inspect manually if needed
-                ssfp_context::append_ctx_println(loss.v);
-                ssfp_context::append_ctx_println(probabilities.mat);
-                ssfp_context::append_ctx_println(W1_updated.mat);
-                ssfp_context::append_ctx_println(b1_updated.mat);
-                ssfp_context::append_ctx_println(W2_updated.mat);
-                ssfp_context::append_ctx_println(b2_updated.mat);
-                ssfp_context::append_ctx_println(W3_updated.mat);
-                ssfp_context::append_ctx_println(b3_updated.mat);
-            }
-        }else{
-            SSFP_PUSH_OUTPUT(hash_all(W1, W2, W3, b1, b2, b3));
-            SSFP_PUSH_OUTPUT(hash_all(W1_updated, W2_updated, W3_updated, b1_updated, b2_updated, b3_updated));
-        }
+        SSFP_PUSH_OUTPUT(W1_updated);
+        SSFP_PUSH_OUTPUT(W2_updated);
+        SSFP_PUSH_OUTPUT(W3_updated);
+        SSFP_PUSH_OUTPUT(b1_updated);
+        SSFP_PUSH_OUTPUT(b2_updated);
+        SSFP_PUSH_OUTPUT(b3_updated);
         SSFP_CTX_SOLVE(false)
     };
     res
 }
 
 
+
+global TOTAL_LENG: u32 = INPUT_SIZE * HIDDEN_SIZE_1 + 
+HIDDEN_SIZE_1 * HIDDEN_SIZE_2 + HIDDEN_SIZE_2 * OUTPUT_SIZE + 
+HIDDEN_SIZE_1 + HIDDEN_SIZE_2 + OUTPUT_SIZE;
+
+global LVL_1_BITS_G: u32 = WHOLE_BITS + DECIMAL_BITS;
+global LVL_2_BITS_G: u32 = WHOLE_BITS + 2*DECIMAL_BITS;
+
+global FIELD_BITS: u32 = (std::field::modulus_num_bits() as u32) - 1;
+global K_W1: u32 = FIELD_BITS / (LVL_2_BITS_G + 1);
+global K_OTHERS: u32 = FIELD_BITS / (LVL_1_BITS_G + 1);
+
+global W1_START: u32 = 0;
+global W2_START: u32 = W1_START + (INPUT_SIZE * HIDDEN_SIZE_1 + K_W1 - 1) / K_W1;
+global W3_START: u32 = W2_START + (HIDDEN_SIZE_1 * HIDDEN_SIZE_2 + K_OTHERS - 1) / K_OTHERS;
+global b1_START: u32 = W3_START + (HIDDEN_SIZE_2 * OUTPUT_SIZE + K_OTHERS - 1) / K_OTHERS;
+global b2_START: u32 = b1_START + (HIDDEN_SIZE_1 + K_OTHERS - 1) / K_OTHERS;
+global b3_START: u32 = b2_START + (HIDDEN_SIZE_2 + K_OTHERS - 1) / K_OTHERS;
+global PACKED_TOTAL: u32 = b3_START + (OUTPUT_SIZE + K_OTHERS - 1) / K_OTHERS;
 
 // Hashing code -----------------------------------------------------
 #[allow(dead_code)]
@@ -378,69 +361,52 @@ fn flatten_raw<let M: u32, let N: u32, let IDX: u32>(flat_arr: &mut [Field; TOTA
     }
 }
 #[allow(dead_code)]
-fn pack<let M: u32, let N: u32, let START: u32, let BITS: u32, let K: u32>
-    (packed_arr: &mut [Field; PACKED_TOTAL], mat: [[Field; N]; M]) 
-{
-    let FULL_GROUPS: u32 = M * N / K;
-    let REM: u32 = M * N % K;
-
-    let OFFSET: Field = 2.pow_32(BITS as Field);
-    let BASE: Field = OFFSET * 2;
-
-    // Pack all complete groups.
-    for g in 0..FULL_GROUPS {
+fn pack<let M: u32, let N: u32, let START: u32, let BITS: u32>(packed_arr: &mut [Field; PACKED_TOTAL], mat: [[Field; N]; M]) {
+    let K: u32 = 253 / (BITS + 1);
+    let full_groups: u32 = M * N / K;
+    let rem: u32 = M * N % K;
+    let offset: Field = 2.pow_32(BITS as Field);
+    let base: Field = offset * 2;
+    for g in 0..full_groups {
         let mut acc: Field = 0;
-
         for s in 0..K {
             let linear: u32 = g * K + K - 1 - s;
             let i: u32 = linear % M;
             let j: u32 = linear / M;
-
-            acc = acc * BASE + mat[i][j] + OFFSET;
+            acc = acc * base + mat[i][j] + offset;
         }
-
         packed_arr[START + g] = acc;
     }
-
-    // Pack the remaining elements, if any
-    if REM != 0 {
+    if rem != 0 {
         let mut acc: Field = 0;
-
-        for s in 0..REM {
-            let linear: u32 = FULL_GROUPS * K + REM - 1 - s;
+        for s in 0..rem {
+            let linear: u32 = full_groups * K + rem - 1 - s;
             let i: u32 = linear % M;
             let j: u32 = linear / M;
-
-            acc = acc * BASE + mat[i][j] + OFFSET;
+            acc = acc * base + mat[i][j] + offset;
         }
-
-        packed_arr[START + FULL_GROUPS] = acc;
+        packed_arr[START + full_groups] = acc;
     }
 }
-comptime fn hash_all(W1: SSFP_MATRIX, W2: SSFP_MATRIX, W3: SSFP_MATRIX, b1: SSFP_MATRIX, b2: SSFP_MATRIX, b3:SSFP_MATRIX) -> CtString{
-    let packed_arr: CtString = ssfp_context::append_ctx_MutVar(f"[Field; {PACKED_TOTAL}]", f"[0; {PACKED_TOTAL}]");
-    
-    let (mat_W1, mat_W2, mat_W3): (CtString, CtString, CtString) = (W1.mat, W2.mat, W3.mat);
-    let (mat_B1, mat_B2, mat_B3): (CtString, CtString, CtString) = (b1.mat, b2.mat, b3.mat);
-    let (BITS_W1, BITS_W2, BITS_W3): (u32, u32, u32) = (lvl_bits(W1.lvl), lvl_bits(W2.lvl), lvl_bits(W3.lvl));
-    let (BITS_B1, BITS_B2, BITS_B3): (u32, u32, u32) = (lvl_bits(b1.lvl), lvl_bits(b2.lvl), lvl_bits(b3.lvl));
-    let mut idx: u32 = 0;
-    ssfp_context::append_ctx_code(f"pack::<{INPUT_SIZE},{HIDDEN_SIZE_1},{idx},{BITS_W1},{K_W1}>(&mut {packed_arr},{mat_W1});\n");
-    idx += packed_len(INPUT_SIZE, HIDDEN_SIZE_1, W1.lvl);
-    ssfp_context::append_ctx_code(f"pack::<{HIDDEN_SIZE_1},{HIDDEN_SIZE_2},{idx},{BITS_W2},{K_OTHERS}>(&mut {packed_arr},{mat_W2});\n");
-    idx += packed_len(HIDDEN_SIZE_1, HIDDEN_SIZE_2, W2.lvl);
-    ssfp_context::append_ctx_code(f"pack::<{HIDDEN_SIZE_2},{OUTPUT_SIZE},{idx},{BITS_W3},{K_OTHERS}>(&mut {packed_arr},{mat_W3});\n");
-    idx += packed_len(HIDDEN_SIZE_2, OUTPUT_SIZE, W3.lvl);
-    ssfp_context::append_ctx_code(f"pack::<1,{HIDDEN_SIZE_1},{idx},{BITS_B1},{K_OTHERS}>(&mut {packed_arr},{mat_B1});\n");
-    idx += packed_len(1, HIDDEN_SIZE_1, b1.lvl);
-    ssfp_context::append_ctx_code(f"pack::<1,{HIDDEN_SIZE_2},{idx},{BITS_B2},{K_OTHERS}>(&mut {packed_arr},{mat_B2});\n");
-    idx += packed_len(1, HIDDEN_SIZE_2, b2.lvl);
-    ssfp_context::append_ctx_code(f"pack::<1,{OUTPUT_SIZE},{idx},{BITS_B3},{K_OTHERS}>(&mut {packed_arr},{mat_B3});\n");
 
-    let h = ssfp_context::append_ctx_var_Field(f"poseidon::poseidon2::Poseidon2::hash({packed_arr}, {PACKED_TOTAL})");
-    h
+fn hash_all(
+    W1: [[Field; HIDDEN_SIZE_1]; INPUT_SIZE],
+    W2: [[Field; HIDDEN_SIZE_2]; HIDDEN_SIZE_1],
+    W3: [[Field; OUTPUT_SIZE]; HIDDEN_SIZE_2],
+    b1: [[Field; HIDDEN_SIZE_1]; 1],
+    b2: [[Field; HIDDEN_SIZE_2]; 1],
+    b3: [[Field; OUTPUT_SIZE]; 1]) -> Field
+{
+    let mut packed_arr: [Field; PACKED_TOTAL] = [0; PACKED_TOTAL];
+    pack::<INPUT_SIZE, HIDDEN_SIZE_1, W1_START, LVL_2_BITS_G>(&mut packed_arr, W1);
+    pack::<HIDDEN_SIZE_1, HIDDEN_SIZE_2, W2_START, LVL_1_BITS_G>(&mut packed_arr, W2);
+    pack::<HIDDEN_SIZE_2, OUTPUT_SIZE, W3_START, LVL_1_BITS_G>(&mut packed_arr, W3);
+    pack::<1, HIDDEN_SIZE_1, b1_START, LVL_1_BITS_G>(&mut packed_arr, b1);
+    pack::<1, HIDDEN_SIZE_2, b2_START, LVL_1_BITS_G>(&mut packed_arr, b2);
+    pack::<1, OUTPUT_SIZE, b3_START, LVL_1_BITS_G>(&mut packed_arr, b3);
+
+    poseidon::poseidon2::Poseidon2::hash(packed_arr, PACKED_TOTAL)
 }
-
 
 
 fn main(
@@ -449,9 +415,21 @@ fn main(
     W1_raw: [[Field; HIDDEN_SIZE_1]; INPUT_SIZE],
     W2_raw: [[Field; HIDDEN_SIZE_2]; HIDDEN_SIZE_1],
     W3_raw: [[Field; OUTPUT_SIZE]; HIDDEN_SIZE_2],
-    b1_raw: [Field; HIDDEN_SIZE_1],
-    b2_raw: [Field; HIDDEN_SIZE_2],
-    b3_raw: [Field; OUTPUT_SIZE]
-) -> pub [Field; 3] {
-    train_batch(data_train, labels_train, W1_raw, W2_raw, W3_raw, b1_raw, b2_raw, b3_raw)
+    b1_raw_arr: [Field; HIDDEN_SIZE_1],
+    b2_raw_arr: [Field; HIDDEN_SIZE_2],
+    b3_raw_arr: [Field; OUTPUT_SIZE]
+) -> pub (Field, Field, Field) {
+    let b1_raw: [[Field; HIDDEN_SIZE_1]; 1] = [b1_raw_arr; 1];
+    let b2_raw: [[Field; HIDDEN_SIZE_2]; 1] = [b2_raw_arr; 1];
+    let b3_raw: [[Field; OUTPUT_SIZE]; 1] = [b3_raw_arr; 1];
+
+    let (loss, W1_updated, W2_updated, W3_updated, b1_updated, b2_updated, b3_updated)
+    = train_batch(data_train, labels_train, W1_raw, W2_raw, W3_raw, b1_raw, b2_raw, b3_raw);
+
+    let h_og = hash_all(W1_raw, W2_raw, W3_raw, b1_raw, b2_raw, b3_raw);
+    let h_new = hash_all(W1_updated, W2_updated, W3_updated, b1_updated, b2_updated, b3_updated);
+    //let (h_og , packed_arr_og) = (0, [0; PACKED_TOTAL]);
+    //let (h_new, packed_arr_new) = (0, [0; PACKED_TOTAL]);
+    
+    (loss, h_og, h_new)
 }

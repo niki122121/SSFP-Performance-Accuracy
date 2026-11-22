@@ -25,7 +25,7 @@ bb gates -s "$SCHEME" -b "target/${NAME}.json"
 echo ""
 
 echo "EXECUTE (no compilation):___________________________________"
-timereal nargo execute --silence-warnings > /dev/null
+timereal nargo execute --silence-warnings --overwrite-return > /dev/null
 echo ""
 
 echo "VK GEN:_____________________________________________________"
