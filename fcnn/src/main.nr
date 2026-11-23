@@ -343,7 +343,6 @@ pub fn train_batch(
         static_assert(W3.lvl == W3_updated.lvl, lvl_err_msg);
         static_assert(b3.lvl == b3_updated.lvl, lvl_err_msg);
 
-
         SSFP_PUSH_OUTPUT(loss);
         SSFP_PUSH_OUTPUT(W1_updated);
         SSFP_PUSH_OUTPUT(W2_updated);
@@ -351,6 +350,7 @@ pub fn train_batch(
         SSFP_PUSH_OUTPUT(b1_updated);
         SSFP_PUSH_OUTPUT(b2_updated);
         SSFP_PUSH_OUTPUT(b3_updated);
+
         SSFP_CTX_SOLVE(false)
     };
     res
