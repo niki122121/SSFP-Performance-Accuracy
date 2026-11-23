@@ -29,32 +29,30 @@ comptime global SSFP_MD_UNKNOWN: SSFP_METADATA = SSFP_METADATA{sgnKnown: false, 
 //mod tests;
 // ----------------------------------------------------------------------------------
 
-comptime fn relu(mat_ssfp: SSFP_MATRIX) -> SSFP_MATRIX{
-    let (M, N) = (mat_ssfp.M, mat_ssfp.N);
+comptime fn relu<let M: u32, let N: u32>(mat_ssfp: SSFP_MATRIX<M,N>) -> SSFP_MATRIX<M,N>{
     if mat_ssfp.md.sgnKnown{
         if mat_ssfp.md.sgnPos{
             mat_ssfp
         }else{
-            SSFP_MATRIX::new_default(M, N, 0, 0)
+            SSFP_MATRIX::default_custom(0, 0)
         }
     }else{
         let (mat, BITS): (CtString, u32) = (mat_ssfp.mat, lvl_bits(mat_ssfp.lvl));
         let res_ij: CtString = f"ssfp::relu_sgnU::<{BITS}>({mat}[i][j])";
-        SSFP_MATRIX::new_from_double_loop(M, N, mat_ssfp.lvl, SSFP_MD_DEFAULT, res_ij)
+        SSFP_MATRIX::new_from_double_loop(mat_ssfp.lvl, SSFP_MD_DEFAULT, res_ij)
     }
 }
-comptime fn relu_der(mat_ssfp: SSFP_MATRIX) -> SSFP_MATRIX{
-    let (M, N) = (mat_ssfp.M, mat_ssfp.N);
+comptime fn relu_der<let M: u32, let N: u32>(mat_ssfp: SSFP_MATRIX<M,N>) -> SSFP_MATRIX<M,N>{
     if mat_ssfp.md.sgnKnown{
         if mat_ssfp.md.sgnPos{
-            SSFP_MATRIX::new_default(M, N, 1, 0)
+            SSFP_MATRIX::default_custom(1, 0)
         }else{
-            SSFP_MATRIX::new_default(M, N, 0, 0)
+            SSFP_MATRIX::default_custom(0, 0)
         }
     }else{
         let (mat, BITS): (CtString, u32) = (mat_ssfp.mat, lvl_bits(mat_ssfp.lvl));
         let res_ij: CtString = f"ssfp::relu_der_sgnU::<{BITS}>({mat}[i][j])";
-        SSFP_MATRIX::new_from_double_loop(M, N, 0, SSFP_MD_DEFAULT, res_ij)
+        SSFP_MATRIX::new_from_double_loop(0, SSFP_MD_DEFAULT, res_ij)
     }
 }
 
@@ -73,18 +71,20 @@ fn sub_max_by_rows<let N_SAMPLES: u32, let BITS: u32>
     }
     logits_adj
 }
-comptime fn softmax<let N_SAMPLES: u32>(logits: SSFP_MATRIX) -> SSFP_MATRIX{
+comptime fn softmax<let N_SAMPLES: u32>(
+    logits: SSFP_MATRIX<N_SAMPLES, OUTPUT_SIZE>
+) -> SSFP_MATRIX<N_SAMPLES, OUTPUT_SIZE>{
     let (l_mat, BITS): (CtString, u32) = (logits.mat, lvl_bits(logits.lvl));
     let logits_adj_op: CtString = f"sub_max_by_rows::<{N_SAMPLES},{BITS}>({l_mat})";
-    let logits_adj: SSFP_MATRIX = SSFP_MATRIX::new(logits.M, logits.N, logits.lvl, SSFP_MD_NEG, logits_adj_op);
-    let exponentials: SSFP_MATRIX = logits_adj.exp();
-    let exp_sum: SSFP_MATRIX = exponentials.add_cols();
-    let exp_sum_inv: SSFP_MATRIX = exp_sum.inv();
+    let logits_adj = SSFP_MATRIX::<N_SAMPLES, OUTPUT_SIZE>::new(logits.lvl, SSFP_MD_NEG, logits_adj_op);
+    let exponentials = logits_adj.exp();
+    let exp_sum = exponentials.add_cols();
+    let exp_sum_inv = exp_sum.inv();
 
     let (exp_mat, exp_sum_inv_mat): (CtString, CtString) = (exponentials.mat, exp_sum_inv.mat);
     let lvl_res: u32 = exponentials.lvl + INV_PRECISION_LVL;
     let res_ij: CtString = f"{exp_mat}[i][j] * {exp_sum_inv_mat}[i][0]"; // compute probabilities
-    SSFP_MATRIX::new_from_double_loop(N_SAMPLES, OUTPUT_SIZE, lvl_res, SSFP_MD_DEFAULT, res_ij)
+    SSFP_MATRIX::new_from_double_loop(lvl_res, SSFP_MD_DEFAULT, res_ij)
 }
 
 
@@ -100,61 +100,88 @@ fn select_correct_probs_rt(
     }
     correct_probs
 }
-comptime fn cross_entropy_loss(probabilites: SSFP_MATRIX, labels_adj: SSFP_MATRIX) -> SSFP{
+comptime fn cross_entropy_loss(
+    probabilites: SSFP_MATRIX<BATCH_SIZE, OUTPUT_SIZE>, labels_adj: SSFP_MATRIX<BATCH_SIZE, OUTPUT_SIZE>
+) -> SSFP{
     let probabilites_mat: CtString = probabilites.mat;
     let labels_adj_mat: CtString = labels_adj.mat;
     let correct_probs_res: CtString = f"select_correct_probs_rt({probabilites_mat},{labels_adj_mat})";
     let correct_probs_var: CtString = ssfp_context::append_ctx_Var(f"[Field; {BATCH_SIZE}]", correct_probs_res);
-    let correct_probs: SSFP_MATRIX = SSFP_MATRIX::new_from_arr(1, BATCH_SIZE, probabilites.lvl, probabilites.md, correct_probs_var);
+    let correct_probs = SSFP_MATRIX::<1, BATCH_SIZE>::new_from_arr(probabilites.lvl, probabilites.md, correct_probs_var);
 
     let loss: SSFP = -(correct_probs.ln().add_cols().get_val(0,0) * BATCH_SIZE_INV);
     loss
 }
 
 
-comptime fn forward<let N_SAMPLES: u32>(
-    x: SSFP_MATRIX, W1: SSFP_MATRIX, W2: SSFP_MATRIX, W3: SSFP_MATRIX, b1: SSFP_MATRIX, b2: SSFP_MATRIX, b3: SSFP_MATRIX)
- -> (SSFP_MATRIX, SSFP_MATRIX, SSFP_MATRIX, SSFP_MATRIX, SSFP_MATRIX){
-    let z1: SSFP_MATRIX = (x * W1).add_broadcasted(b1);
-    let a1: SSFP_MATRIX = relu(z1);
+comptime fn forward(
+    x: SSFP_MATRIX<BATCH_SIZE, INPUT_SIZE>,
+    W1: SSFP_MATRIX<INPUT_SIZE, HIDDEN_SIZE_1>,
+    W2: SSFP_MATRIX<HIDDEN_SIZE_1, HIDDEN_SIZE_2>,
+    W3: SSFP_MATRIX<HIDDEN_SIZE_2, OUTPUT_SIZE>,
+    b1: SSFP_MATRIX<1, HIDDEN_SIZE_1>,
+    b2: SSFP_MATRIX<1, HIDDEN_SIZE_2>,
+    b3: SSFP_MATRIX<1, OUTPUT_SIZE>
+) -> (
+    SSFP_MATRIX<BATCH_SIZE, OUTPUT_SIZE>,
+    SSFP_MATRIX<BATCH_SIZE, HIDDEN_SIZE_1>,
+    SSFP_MATRIX<BATCH_SIZE, HIDDEN_SIZE_1>,
+    SSFP_MATRIX<BATCH_SIZE, HIDDEN_SIZE_2>,
+    SSFP_MATRIX<BATCH_SIZE, HIDDEN_SIZE_2>
+){
+    let z1 = x.mult_mat(W1).add_broadcasted(b1);
+    let a1 = relu(z1);
 
-    let z2: SSFP_MATRIX = (a1 * W2).add_broadcasted(b2);
-    let a2: SSFP_MATRIX = relu(z2);
+    let z2 = a1.mult_mat(W2).add_broadcasted(b2);
+    let a2 = relu(z2);
 
-    let z3: SSFP_MATRIX = (a2 * W3).add_broadcasted(b3);
-    let probabilites: SSFP_MATRIX = softmax::<N_SAMPLES>(z3);
+    let z3 = a2.mult_mat(W3).add_broadcasted(b3);
+    let probabilites = softmax(z3);
 
     (probabilites, z1, a1, z2, a2)
 }
 
 
 comptime fn backward(
-    x: SSFP_MATRIX, labels_adj: SSFP_MATRIX, probabilites: SSFP_MATRIX, 
-    z1: SSFP_MATRIX, a1: SSFP_MATRIX, z2: SSFP_MATRIX, a2: SSFP_MATRIX,
-    W2: SSFP_MATRIX, W3: SSFP_MATRIX
-) -> (SSFP_MATRIX, SSFP_MATRIX, SSFP_MATRIX, SSFP_MATRIX, SSFP_MATRIX, SSFP_MATRIX){
+    x: SSFP_MATRIX<BATCH_SIZE, INPUT_SIZE>,
+    labels_adj: SSFP_MATRIX<BATCH_SIZE, OUTPUT_SIZE>,
+    probabilites: SSFP_MATRIX<BATCH_SIZE, OUTPUT_SIZE>,
+    z1: SSFP_MATRIX<BATCH_SIZE, HIDDEN_SIZE_1>,
+    a1: SSFP_MATRIX<BATCH_SIZE, HIDDEN_SIZE_1>,
+    z2: SSFP_MATRIX<BATCH_SIZE, HIDDEN_SIZE_2>,
+    a2: SSFP_MATRIX<BATCH_SIZE, HIDDEN_SIZE_2>,
+    W2: SSFP_MATRIX<HIDDEN_SIZE_1, HIDDEN_SIZE_2>,
+    W3: SSFP_MATRIX<HIDDEN_SIZE_2, OUTPUT_SIZE>
+) -> (
+    SSFP_MATRIX<INPUT_SIZE, HIDDEN_SIZE_1>,
+    SSFP_MATRIX<1, HIDDEN_SIZE_1>,
+    SSFP_MATRIX<HIDDEN_SIZE_1, HIDDEN_SIZE_2>,
+    SSFP_MATRIX<1, HIDDEN_SIZE_2>,
+    SSFP_MATRIX<HIDDEN_SIZE_2, OUTPUT_SIZE>,
+    SSFP_MATRIX<1, OUTPUT_SIZE>
+){
     // Note the multiplication by Learning Rate here. It propagates downwards to all our matrices and we avoid
     // having to do it at the end (tipically W -= dW * LR, but here it is already backed in).
     // Also, we do a manual reset (by testing it gave us slightly less acir opcodes)
-    let dz3: SSFP_MATRIX = (probabilites - labels_adj).mult_val(BATCH_SIZE_INV).mult_val(LEARNING_RATE).reset_full();
-    let dW3: SSFP_MATRIX = a2.transpose() * dz3;
-    let db3: SSFP_MATRIX = dz3.add_rows();
-    let da2: SSFP_MATRIX = dz3 * W3.transpose();
+    let dz3 = (probabilites - labels_adj).mult_val(BATCH_SIZE_INV).mult_val(LEARNING_RATE).reset_full();
+    let dW3 = a2.transpose().mult_mat(dz3);
+    let db3 = dz3.add_rows();
+    let da2 = dz3.mult_mat(W3.transpose());
 
-    let dz2: SSFP_MATRIX = da2.mult_elemwise(relu_der(z2));
-    let dW2: SSFP_MATRIX = a1.transpose() * dz2;
-    let db2: SSFP_MATRIX = dz2.add_rows();
-    let da1: SSFP_MATRIX = dz2 * W2.transpose();
+    let dz2 = da2.mult_elemwise(relu_der(z2));
+    let dW2 = a1.transpose().mult_mat(dz2);
+    let db2 = dz2.add_rows();
+    let da1 = dz2.mult_mat(W2.transpose());
 
     // manual reset of dz1 is purely for convinience as it makes level dW1 = 2
     // This coincides with the starting level of W1 and allows us to avoid an expensive reset of all it's elements
-    let dz1: SSFP_MATRIX = da1.mult_elemwise(relu_der(z1)).reset_full();
+    let dz1 = da1.mult_elemwise(relu_der(z1)).reset_full();
     // This check is key as it constarins the updated weights_1 without explicitly calling .check() on the entire weight matrix
     // the chosen DZ1_BITS combined with the known ranges of x and the known number of batches to be performed when training
     // allows us to establish this limit.
     dz1.check_raw_bit_size(DZ1_BITS as u32);
-    let dW1: SSFP_MATRIX = x.transpose() * dz1;
-    let db1: SSFP_MATRIX = dz1.add_rows();
+    let dW1 = x.transpose().mult_mat(dz1);
+    let db1 = dz1.add_rows();
 
     (dW1, db1, dW2, db2, dW3, db3)
 }
@@ -190,7 +217,7 @@ fn accuracy_count_rt<let N_SAMPLES: u32, let BITS: u32>(probabilites: [[Field; O
     correct_count
 }
 #[allow(dead_code)]
-comptime fn accuracy_count<let N_SAMPLES: u32>(probabilites: SSFP_MATRIX, labels: CtString) -> CtString{
+comptime fn accuracy_count<let N_SAMPLES: u32>(probabilites: SSFP_MATRIX<N_SAMPLES, OUTPUT_SIZE>, labels: CtString) -> CtString{
     let probabilites_mat: CtString = probabilites.mat;
     let probabilites_BITS: u32 = lvl_bits(probabilites.lvl);
     ssfp_context::append_ctx_var_Field(f"accuracy_count_rt::<{N_SAMPLES},{probabilites_BITS}>({probabilites_mat},{labels})")
@@ -234,10 +261,10 @@ fn validate_and_adjust_labels_rt<let N_SAMPLES: u32>(labels: [Field; N_SAMPLES])
     }
     labels_adj
 }
-comptime fn validate_and_adjust_labels<let N_SAMPLES: u32>(labels_train_ctstr: CtString) -> SSFP_MATRIX{
+comptime fn validate_and_adjust_labels<let N_SAMPLES: u32>(labels_train_ctstr: CtString) -> SSFP_MATRIX<N_SAMPLES, OUTPUT_SIZE>{
     let l_adj_ctstr: CtString = f"validate_and_adjust_labels_rt::<{N_SAMPLES}>({labels_train_ctstr})";
     let l_adj_ctstr_var: CtString = ssfp_context::append_ctx_Var(f"[[Field; {OUTPUT_SIZE}]; {N_SAMPLES}]", l_adj_ctstr);
-    SSFP_MATRIX::new(N_SAMPLES, OUTPUT_SIZE, 0, SSFP_MD_DEFAULT, l_adj_ctstr_var)
+    SSFP_MATRIX::new(0, SSFP_MD_DEFAULT, l_adj_ctstr_var)
 }
 
 // input weights and biases, outputs loss, updated weights and updated biases
@@ -275,23 +302,22 @@ pub fn train_batch(
         // W1 is level 2 so we avoid an expensive reset at the en of the batch when updating and hashing weights
         // Note we do NOT check the weight and bias matrices as the check is essentially done by the hash.
         // Otherwise we would need to invoke .check()
-        let W1: SSFP_MATRIX = SSFP_MATRIX::init(INPUT_SIZE, HIDDEN_SIZE_1, 2, SSFP_MD_DEFAULT, "W1_raw");
-        let W2: SSFP_MATRIX = SSFP_MATRIX::init(HIDDEN_SIZE_1, HIDDEN_SIZE_2, 1, SSFP_MD_DEFAULT, "W2_raw");
-        let W3: SSFP_MATRIX = SSFP_MATRIX::init(HIDDEN_SIZE_2, OUTPUT_SIZE, 1, SSFP_MD_DEFAULT, "W3_raw");
-
-        let b1: SSFP_MATRIX = SSFP_MATRIX::init(1, HIDDEN_SIZE_1, 1, SSFP_MD_UNKNOWN, "b1_raw");
-        let b2: SSFP_MATRIX = SSFP_MATRIX::init(1, HIDDEN_SIZE_2, 1, SSFP_MD_UNKNOWN, "b2_raw");
-        let b3: SSFP_MATRIX = SSFP_MATRIX::init(1, OUTPUT_SIZE, 1, SSFP_MD_UNKNOWN, "b3_raw");
+        let W1 = SSFP_MATRIX::<INPUT_SIZE, HIDDEN_SIZE_1>::init(2, SSFP_MD_DEFAULT, "W1_raw");
+        let W2 = SSFP_MATRIX::<HIDDEN_SIZE_1, HIDDEN_SIZE_2>::init(1, SSFP_MD_DEFAULT, "W2_raw");
+        let W3 = SSFP_MATRIX::<HIDDEN_SIZE_2, OUTPUT_SIZE>::init(1, SSFP_MD_DEFAULT, "W3_raw");
+        let b1 = SSFP_MATRIX::<1, HIDDEN_SIZE_1>::init(1, SSFP_MD_UNKNOWN, "b1_raw");
+        let b2 = SSFP_MATRIX::<1, HIDDEN_SIZE_2>::init(1, SSFP_MD_UNKNOWN, "b2_raw");
+        let b3 = SSFP_MATRIX::<1, OUTPUT_SIZE>::init(1, SSFP_MD_UNKNOWN, "b3_raw");
 
         
-        let x_train_raw: SSFP_MATRIX = SSFP_MATRIX::init_from_ints(BATCH_SIZE, INPUT_SIZE, SSFP_MD_DEFAULT, "data_train");
+        let x_train_raw = SSFP_MATRIX::<BATCH_SIZE, INPUT_SIZE>::init_from_ints(SSFP_MD_DEFAULT, "data_train");
         x_train_raw.check_raw_bit_size(8);
-        let x_train: SSFP_MATRIX = x_train_raw.mult_val(INV_256);
+        let x_train = x_train_raw.mult_val(INV_256);
 
-        let labels_adj_train: SSFP_MATRIX = validate_and_adjust_labels::<BATCH_SIZE>("labels_train");
+        let labels_adj_train = validate_and_adjust_labels::<BATCH_SIZE>("labels_train");
 
         // BATCH TRAIN ---------------------------------------------------------------------------------------------------------------------------
-        let (probabilities, z1, a1, z2, a2) = forward::<BATCH_SIZE>(x_train, W1, W2, W3, b1, b2, b3);
+        let (probabilities, z1, a1, z2, a2) = forward(x_train, W1, W2, W3, b1, b2, b3);
 
         let loss: SSFP = cross_entropy_loss(probabilities, labels_adj_train);
 
@@ -302,12 +328,12 @@ pub fn train_batch(
         // Note we dont adjust by Learning Rate as this is done in backpropagation automatically
         // Also note that W1 is not reset. We try to avoid reseting this larger matrix and decide to
         // set W1 as well as dW1 to lvl 2
-        let W1_updated: SSFP_MATRIX = W1 - dW1;
-        let b1_updated: SSFP_MATRIX = (b1 - db1).reset_full();
-        let W2_updated: SSFP_MATRIX = (W2 - dW2).reset_full();
-        let b2_updated: SSFP_MATRIX = (b2 - db2).reset_full();
-        let W3_updated: SSFP_MATRIX = (W3 - dW3).reset_full();
-        let b3_updated: SSFP_MATRIX = (b3 - db3).reset_full();
+        let W1_updated = W1 - dW1;
+        let b1_updated = (b1 - db1).reset_full();
+        let W2_updated = (W2 - dW2).reset_full();
+        let b2_updated = (b2 - db2).reset_full();
+        let W3_updated = (W3 - dW3).reset_full();
+        let b3_updated = (b3 - db3).reset_full();
 
         let lvl_err_msg: CtString = "Levels must match so compiled code can be reused for more batches and epochs";
         static_assert(W1.lvl == W1_updated.lvl, lvl_err_msg);
@@ -405,7 +431,8 @@ fn hash_all(
     pack::<1, HIDDEN_SIZE_2, b2_START, LVL_1_BITS_G>(&mut packed_arr, b2);
     pack::<1, OUTPUT_SIZE, b3_START, LVL_1_BITS_G>(&mut packed_arr, b3);
 
-    poseidon::poseidon2::Poseidon2::hash(packed_arr, PACKED_TOTAL)
+    let h: Field = poseidon::poseidon2::Poseidon2::hash(packed_arr, PACKED_TOTAL);
+    h
 }
 
 
@@ -428,8 +455,6 @@ fn main(
 
     let h_og = hash_all(W1_raw, W2_raw, W3_raw, b1_raw, b2_raw, b3_raw);
     let h_new = hash_all(W1_updated, W2_updated, W3_updated, b1_updated, b2_updated, b3_updated);
-    //let (h_og , packed_arr_og) = (0, [0; PACKED_TOTAL]);
-    //let (h_new, packed_arr_new) = (0, [0; PACKED_TOTAL]);
     
     (loss, h_og, h_new)
 }
